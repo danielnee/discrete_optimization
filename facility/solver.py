@@ -1,64 +1,107 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-from collections import namedtuple
-import math
+import pandas as pd
+import numpy as np
 
-Point = namedtuple("Point", ['x', 'y'])
-Facility = namedtuple("Facility", ['index', 'setup_cost', 'capacity', 'location'])
-Customer = namedtuple("Customer", ['index', 'demand', 'location'])
+from pulp import *
+from io import StringIO
 
-def length(point1, point2):
-    return math.sqrt((point1.x - point2.x)**2 + (point1.y - point2.y)**2)
+def euclidean_distance(x_1, x_2, y_1, y_2):
+    return np.sqrt( np.square(x_1 - x_2)  + np.square(y_1 - y_2) )
+
 
 def solve_it(input_data):
     # Modify this code to run your optimization algorithm
 
     # parse the input
-    lines = input_data.split('\n')
+    data_file = StringIO(input_data)
+    data = pd.read_csv(data_file, sep=" ", names=["a", "b", "c", "d"], dtype={"a":float, "b":float, "c":float, "d":float})
 
-    parts = lines[0].split()
-    facility_count = int(parts[0])
-    customer_count = int(parts[1])
+    n = int(data["a"][0])
+    m = int(data["b"][0])
+    print("n=%s" % n)
+    print("m=%s" % m)
+
+    facilities = data[1:(n+1)].rename({"a":"cost", "b":"capacity", "c":"x", "d":"y"}, axis="columns").reset_index(drop=True)
+    customers = data[(n+1):].drop("d", axis=1).rename({"a":"demand", "b":"x", "c":"y"}, axis="columns").reset_index(drop=True)
+
+    F = list(range(0, n))
+    C = list(range(0, m))
+    f = np.array(facilities.capacity)
+    c = np.array(customers.demand)
+    s = np.array(facilities.cost)
+    d = np.zeros([n, m])
+
+    all_pairs = [(i, j) for i in F for j in C]
+    facility_locations = np.array(facilities[["x", "y"]])
+    customer_locations = np.array(customers[["x", "y"]])
+
+    for pair in all_pairs:
+        i = pair[0]
+        j = pair[1]
+        d[i,j] = euclidean_distance(facility_locations[i,0], customer_locations[j,0], facility_locations[i,1], customer_locations[j,1])
     
-    facilities = []
-    for i in range(1, facility_count+1):
-        parts = lines[i].split()
-        facilities.append(Facility(i-1, float(parts[0]), int(parts[1]), Point(float(parts[2]), float(parts[3])) ))
 
-    customers = []
-    for i in range(facility_count+1, facility_count+1+customer_count):
-        parts = lines[i].split()
-        customers.append(Customer(i-1-facility_count, int(parts[0]), Point(float(parts[1]), float(parts[2]))))
+    ### Create Problem/ Solver
+    prob = LpProblem("The facility location problem", LpMinimize)
 
-    # build a trivial solution
-    # pack the facilities one by one until all the customers are served
-    solution = [-1]*len(customers)
-    capacity_remaining = [f.capacity for f in facilities]
+    ### Create decision variables
+    xij = {}
+    for i in F:
+        for j in C:
+            xij[i,j] = LpVariable("x_%s_%s" % (i,j), 0, 1, LpBinary)
+            
+    pi = {}
+    for i in F:
+        pi[i] = LpVariable("p_%s" % (i), 0, 1, LpBinary)
+        
+    ## Set the objective function 
+    prob += lpSum([d[(i,j)]*xij[i,j] for i in F for j in C]) + lpSum([s[i] * pi[i] for i in F])
 
-    facility_index = 0
-    for customer in customers:
-        if capacity_remaining[facility_index] >= customer.demand:
-            solution[customer.index] = facility_index
-            capacity_remaining[facility_index] -= customer.demand
-        else:
-            facility_index += 1
-            assert capacity_remaining[facility_index] >= customer.demand
-            solution[customer.index] = facility_index
-            capacity_remaining[facility_index] -= customer.demand
+    ## Set constraint 1
+    for j in C:
+        prob += lpSum([xij[i,j] for i in F]) == 1,"%s must be assigned to at least one facility" % (j)
 
-    used = [0]*len(facilities)
-    for facility_index in solution:
-        used[facility_index] = 1
+    ## Set constraint 2
+    for i in F:
+        prob += lpSum([xij[i,j] * c[j] for j in C]) <= f[i],"%s demand must not exceed capacity" % (i)
 
-    # calculate the cost of the solution
-    obj = sum([f.setup_cost*used[f.index] for f in facilities])
-    for customer in customers:
-        obj += length(customer.location, facilities[solution[customer.index]].location)
+    ## Set constraint 3
+    for i in F:
+        for j in C:
+            prob += xij[i,j] <= pi[i]
 
-    # prepare the solution in the specified output format
-    output_data = '%.2f' % obj + ' ' + str(0) + '\n'
-    output_data += ' '.join(map(str, solution))
+    import time
+
+    start = time.time()
+    ## Solve model
+    prob.solve(solvers.PULP_CBC_CMD(maxSeconds=1200, threads=3,fracGap=0.0001))
+    end = time.time()
+    print(pulp.LpStatus[prob.status], "solution is: ", float(end - start), "sec")
+
+    ## Print variables with value greater than 0 
+    for v in prob.variables():
+        if v.varValue>0:
+            print(v.name, "=", v.varValue)
+
+    # Print The optimal objective function value
+    print("Total Cost = ", pulp.value(prob.objective))
+
+    ## Print variables with value greater than 0 
+    customer_assignments = {}
+    for v in prob.variables():
+        if v.varValue > 0:
+            var_split = v.name.split("_")
+            if (var_split[0] == "x"):
+                customer_assignments[var_split[2]] = var_split[1]
+
+    settings = [customer_assignments[str(i)] for i in range(0,m)]
+
+    is_opt = str(1) if pulp.LpStatus[prob.status] == "Optimal" else str(0)
+
+    output_data = str(pulp.value(prob.objective)) + ' ' + is_opt + '\n'
+    output_data += ' '.join(map(str, settings))
 
     return output_data
 
