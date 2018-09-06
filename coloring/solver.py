@@ -26,30 +26,46 @@ class SolutionPrinter(cp_model.CpSolverSolutionCallback):
   def GetSolutions(self):
     return self.__solutions
 
-def solve_it(input_data):
-    # Modify this code to run your optimization algorithm
+def greedy(degrees, G, edge_list, n):
+    max_degree_order = list(reversed(np.argsort(degrees)))
+    C = [-1] * n
+    C[max_degree_order[0]] = 0
+    max_degree_order = max_degree_order[1:]
 
-    # parse the input
-    data_file = StringIO(input_data)
-    data = pd.read_csv(data_file, sep=" ", names=["vertices", "edges"])
+    for cur_index in max_degree_order:
 
-    n = data.vertices[0]
-    e = data.edges[0]
-    edge_list = np.array(data[1:])
+        max_col = max(C)
 
-    print(n)
+        used_colours = {C[i] for i in range(0, n) if G[cur_index,i] == 1 and C[i] != -1}
+        all_colours = {i for i in range(0, max_col+1)}
+        available_colours = all_colours.difference(used_colours)
+        col_counts = [[x,C.count(x)] for x in set(C) if x != -1]
 
-    degrees = np.zeros((n,1))
-    for edge in edge_list:
-        e1 = edge[0]
-        e2 = edge[1]
-        degrees[e1] += 1
-        degrees[e2] += 1
-    max_degree_node = np.argmax(degrees)
+        if len(available_colours) == 0:
+            C[cur_index] = max_col + 1
+        elif len(available_colours) == 1:
+            C[cur_index] = list(available_colours)[0]
+        else:
+            # Pick least used colour
+            avail_col_count = list(filter(lambda x : x[0] in available_colours, col_counts))
 
-    max_colours = 100
+            min_count = avail_col_count[0][1]
+            min_color = avail_col_count[0][0]
+
+            for i in range(1, len(avail_col_count)):
+                if min_count < avail_col_count[i][1]:
+                    min_count = avail_col_count[i][1]
+                    min_color = avail_col_count[i][0]
+
+            C[cur_index] = min_color
+    
+    return C
+
+def constraint_programming(degrees, G, edge_list, n):
+    max_colours = 30
     min_colours = 5
-    MAX_TIME = 60.0
+    MAX_TIME = 300.0
+    max_degree_node = np.argmax(degrees)
 
     for num_colours in range(min_colours, max_colours + 1):
 
@@ -73,7 +89,7 @@ def solve_it(input_data):
         # symmetry breaking
         # Chose vertex with highest degreee and assign it the first colour
         model.Add(C[max_degree_node] == 0)
-        
+
         for i in range(1, num_colours):
             model.Add(C[i] <= i+1);
 
@@ -84,16 +100,48 @@ def solve_it(input_data):
         status = solver.SolveWithSolutionObserver(model, solution_printer)
         #print("Number of colours: %i" % num_colours)
         print('Number of solutions found: %i' % solution_printer.SolutionCount())
-        
+
         if solution_printer.SolutionCount() > 0:
             break
-            
+
     # Now ensure you get solution with minimum
     solutions = solution_printer.GetSolutions()
     max_color = [max(C) for C in solutions]
     best_index = np.argmin(max_color)
     node_count = max_color[best_index]
     solution = solutions[best_index]
+
+    return solution
+
+def solve_it(input_data):
+    # Modify this code to run your optimization algorithm
+
+    # parse the input
+    data_file = StringIO(input_data)
+    data = pd.read_csv(data_file, sep=" ", names=["vertices", "edges"])
+
+    n = data.vertices[0]
+    e = data.edges[0]
+    edge_list = np.array(data[1:])
+
+    print(n)
+    print(e)
+
+    degrees = [0] * n
+    G = np.zeros((n, n))
+    for edge in edge_list:
+        e1 = edge[0]
+        e2 = edge[1]
+        G[e1, e2] = 1
+        G[e2, e1] = 1
+        degrees[e1] += 1
+        degrees[e2] += 1
+
+    if n <= 100:
+        solution = constraint_programming(degrees, G, edge_list, n)
+    else:
+        solution = greedy(degrees, G, edge_list, n)
+    node_count = max(solution) + 1
     
     # prepare the solution in the specified output format
     output_data = str(node_count) + ' ' + str(0) + '\n'
