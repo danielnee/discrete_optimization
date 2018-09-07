@@ -1,74 +1,245 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-import math
-from collections import namedtuple
+import pandas as pd
+import numpy as np
+import random
+import time
 
-Customer = namedtuple("Customer", ['index', 'demand', 'x', 'y'])
+from io import StringIO
 
-def length(customer1, customer2):
-    return math.sqrt((customer1.x - customer2.x)**2 + (customer1.y - customer2.y)**2)
+class Vertex:
+    
+    def __init__(self, index, x, y):
+        self.index = index
+        self.x = x
+        self.y = y
+        
+def euclidean_distance(vertex_1, vertex_2):
+    return np.sqrt( np.square(vertex_1.x - vertex_2.x)  + np.square(vertex_1.y - vertex_2.y) )
+        
+def compute_distance_matrix(vertices, n):
+    all_pairs = [(i, j) for i in range(0, n) for j in range(0, n) if i != j]
+    dist_matrix = np.zeros((n, n))
+    for k in all_pairs:
+        x = k[0]; y = k[1]
+        dist_matrix[x, y] = euclidean_distance(vertices[x], vertices[y])
+    return dist_matrix    
+
+def tour_list(routes):
+    output = []
+    for k in routes:
+        output.append([i.index for i in k])
+    
+    return output
+
+def compute_tour_distance(route, dist_matrix):
+    head_route = route[:-1]
+    tail_route = route[1:]
+    pair_route = zip(head_route, tail_route)    
+    return sum(map(lambda pair: dist_matrix[pair[0].index, pair[1].index], pair_route))
+
+def compute_routes_distance(routes, dist_matrix):
+    return sum([compute_tour_distance(route, dist_matrix) for route in routes])
+    
+def current_route_demand(route, customer_demands):
+    return sum(map(lambda x: customer_demands[x.index], route))
+
+def best_insertion_initialisation(customer_locations, customer_distances, customer_demands, n, v, c):
+    # Initialise all routes
+    depot = customer_locations[0]
+    routes = []
+    used_capacity = []
+    for i in range(0, v):
+        routes.append([depot, depot])
+        used_capacity.append(0)
+
+    # Add in decreasing order of demand
+    order_to_add = list(reversed(np.argsort(customer_demands)))[:-1]
+        
+    return best_insertion(order_to_add, used_capacity, routes, customer_locations, 
+                          customer_distances, customer_demands, n, v, c)
+
+def best_insertion(customer_list, used_capacity, routes, customer_locations, 
+                   customer_distances, customer_demands, n, v, c):
+    routes = routes.copy()
+    for customer in customer_list:
+        # Iterate through all vans and insertions
+        potential_locations = [(i, j) for i in range(0, v) for j in range(0, len(routes[i]) - 1)]
+
+        best_route = None
+        best_distance = np.inf
+        best_demand = None
+        best_van = None
+        for pair in potential_locations:
+            van = pair[0]
+            insert_after = pair[1]
+
+            route = routes[van]
+
+            route = route[0:insert_after+1] + [customer_locations[customer]] + route[insert_after+1:]
+            routes_copy = routes.copy()
+            routes_copy[van] = route
+
+            new_distance = compute_routes_distance(routes_copy, customer_distances)
+
+            # Check capacity
+            new_used_capacity = used_capacity[van] + customer_demands[customer]
+
+            if new_used_capacity <= c and new_distance < best_distance:
+                best_route = routes_copy
+                best_distance = new_distance
+                best_demand = customer_demands[customer]
+                best_van = van
+
+        if best_route is None:
+            raise Exception("Couldn't add customer " + str(customer))
+
+        used_capacity[best_van] = used_capacity[best_van] + best_demand
+        routes = best_route
+        
+    return routes
+
+def best_insertion_iteration(routes, customers_to_add, customer_locations, 
+                   customer_distances, customer_demands, n, v, c):
+    # Check current capacities
+    used_capacity = []
+    for i in range(0, v):
+        route = routes[i]
+        used_capacity.append(current_route_demand(route, customer_demands))
+        
+    # Add in decreasing order of demand
+    demands = [customer_demands[i.index] for i in customers_to_add]
+    order_to_add = list(reversed(np.argsort(demands)))
+    customers = [customers_to_add[i].index for i in order_to_add]
+    
+    return best_insertion(customers, used_capacity, routes, customer_locations, 
+                   customer_distances, customer_demands, n, v, c)
+
+def random_van_removal(routes, customer_locations, v, max_vans):
+    no_vans_to_remove = np.random.randint(1, max_vans + 1)
+    van_lists = list(range(0, v))
+    vans_to_remove = random.sample(van_lists, no_vans_to_remove)
+    depot = customer_locations[0]
+    
+    routes_removed = [routes[i] for i in vans_to_remove]
+    customers_removed =  [customer for route in routes_removed for customer in route]
+    customers_removed = list(filter(lambda x : x.index != 0, customers_removed))
+    
+    routes_copy = routes.copy()
+    for i in vans_to_remove:
+        routes_copy[i] = [depot, depot]
+        
+    return (routes, customers_removed)    
+
+def random_customer_removal(routes, customer_locations, n, removal_percent):
+    no_customers_remove = int(np.floor(removal_percent * n))
+    customer_list = list(range(1, n))
+    customers_to_remove = random.sample(customer_list, no_customers_remove)
+    removal_set = set(customers_to_remove)
+    
+    output_routes = []
+    for route in routes:
+        
+        output_route = []
+        cur_index = 0
+        for i in range(1, len(route)):
+            cur_customer = route[i].index
+            if cur_customer in removal_set:
+                output_route.extend(route[cur_index:i].copy())
+                cur_index = i + 1
+        
+        output_route.extend(route[cur_index:].copy())
+        output_routes.append(output_route)
+        
+    customers_to_remove = [customer_locations[i] for i in customers_to_remove] 
+       
+    return (output_routes, customers_to_remove)       
+
+def local_search(customer_locations, customer_distances, customer_demands, n, v, c, seconds_timeout = 300):
+    
+    routes = best_insertion_initialisation(customer_locations, customer_distances, customer_demands, n, v, c)
+    best_distance = compute_routes_distance(routes, customer_distances)
+    
+    start_time = round(time.time())
+    it = 0
+    
+    print(best_distance) 
+
+    while True:
+        it += 1
+        
+        if it % 100 == 0:
+            print(best_distance)        
+        
+        # Check timeout
+        time_now = round(time.time())
+        time_diff = time_now - start_time
+        if (seconds_timeout != -1 and time_diff > seconds_timeout):
+            print("TIMEOUT")
+            break
+            
+        # Random customer removal
+        new_routes, customers_removed = random_customer_removal(routes, customer_locations, n, 0.2)
+        try:
+            new_routes = best_insertion_iteration(new_routes, customers_removed, customer_locations, 
+                   customer_distances, customer_demands, n, v, c)
+        except:
+            new_routes = routes
+        new_distance = compute_routes_distance(new_routes, customer_distances)
+        if (new_distance < best_distance):
+            routes = new_routes            
+            best_distance = new_distance
+            
+        # Random van removal    
+        max_vans = np.floor(v / 2)
+        new_routes, customers_removed = random_van_removal(routes, customer_locations, v, max_vans)
+        try:
+            new_routes = best_insertion_iteration(new_routes, customers_removed, customer_locations, 
+                   customer_distances, customer_demands, n, v, c)
+        except:
+            new_routes = routes
+        new_distance = compute_routes_distance(new_routes, customer_distances)
+        if (new_distance < best_distance):
+            routes = new_routes            
+            best_distance = new_distance
+            
+        # Repeat until timeout reached    
+        
+    return routes
 
 def solve_it(input_data):
     # Modify this code to run your optimization algorithm
 
-    # parse the input
-    lines = input_data.split('\n')
+   # parse the input
+    data_file = StringIO(input_data)
+    data = pd.read_csv(data_file, sep=" ", names=["a", "b", "c"])
 
-    parts = lines[0].split()
-    customer_count = int(parts[0])
-    vehicle_count = int(parts[1])
-    vehicle_capacity = int(parts[2])
-    
-    customers = []
-    for i in range(1, customer_count+1):
-        line = lines[i]
-        parts = line.split()
-        customers.append(Customer(i-1, int(parts[0]), float(parts[1]), float(parts[2])))
+    n = int(data.a[0])
+    v = int(data.b[0])
+    c = int(data.c[0])
 
-    #the depot is always the first customer in the input
-    depot = customers[0] 
+    print(n)
+    print(v)
 
+    customer_demands = [None] * n
+    customer_locations = [None] * n
+    for i in range(0, n):
+        index = i + 1
+        customer_demands[i] = int(data.a[index])
+        customer_locations[i] = Vertex(i, data.b[index], data.c[index])
 
-    # build a trivial solution
-    # assign customers to vehicles starting by the largest customer demands
-    vehicle_tours = []
-    
-    remaining_customers = set(customers)
-    remaining_customers.remove(depot)
-    
-    for v in range(0, vehicle_count):
-        # print "Start Vehicle: ",v
-        vehicle_tours.append([])
-        capacity_remaining = vehicle_capacity
-        while sum([capacity_remaining >= customer.demand for customer in remaining_customers]) > 0:
-            used = set()
-            order = sorted(remaining_customers, key=lambda customer: -customer.demand)
-            for customer in order:
-                if capacity_remaining >= customer.demand:
-                    capacity_remaining -= customer.demand
-                    vehicle_tours[v].append(customer)
-                    # print '   add', ci, capacity_remaining
-                    used.add(customer)
-            remaining_customers -= used
+    # Pre-compute customer-customer distances
+    customer_distances = compute_distance_matrix(customer_locations, n)
+    routes = local_search(customer_locations, customer_distances, customer_demands, n, v, c, 30)
 
-    # checks that the number of customers served is correct
-    assert sum([len(v) for v in vehicle_tours]) == len(customers) - 1
-
-    # calculate the cost of the solution; for each vehicle the length of the route
-    obj = 0
-    for v in range(0, vehicle_count):
-        vehicle_tour = vehicle_tours[v]
-        if len(vehicle_tour) > 0:
-            obj += length(depot,vehicle_tour[0])
-            for i in range(0, len(vehicle_tour)-1):
-                obj += length(vehicle_tour[i],vehicle_tour[i+1])
-            obj += length(vehicle_tour[-1],depot)
+    obj = compute_routes_distance(routes, customer_distances)
+    tour = tour_list(routes)
 
     # prepare the solution in the specified output format
     outputData = '%.2f' % obj + ' ' + str(0) + '\n'
-    for v in range(0, vehicle_count):
-        outputData += str(depot.index) + ' ' + ' '.join([str(customer.index) for customer in vehicle_tours[v]]) + ' ' + str(depot.index) + '\n'
+    for route in tour:
+         outputData += ' '.join([str(i) for i in route]) + "\n"
 
     return outputData
 
